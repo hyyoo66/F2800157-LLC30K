@@ -30,7 +30,23 @@
       "Bash(tar -czf backup_260507_2132_watchdog.tar.gz main.c init_DSP_ADC.c init_DSP_ADC.h key_print_digit_260507.c key_print_digit_260507.h)",
       "Bash(tar -czf backup_260507_2230_isr_fix.tar.gz main.c init_DSP_ADC.c init_DSP_ADC.h key_print_digit_260507.c key_print_digit_260507.h)",
       "Bash(tar -tzf backup_260507_2230_isr_fix.tar.gz)",
-      "PowerShell(git -C \"D:\\\\Ti_280039_Work_Space\\\\F2800157-LLC30K\" init)"
+      "PowerShell(git -C \"D:\\\\Ti_280039_Work_Space\\\\F2800157-LLC30K\" init)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Write(D:/Ti_280039_Work_Space/F2800157-LLC30K/**)",
+      "Edit(D:/Ti_280039_Work_Space/F2800157-LLC30K/**)",
+      "PowerShell(Copy-Item *)",
+      "PowerShell(Remove-Item *)",
+      "PowerShell(Move-Item *)",
+      "PowerShell(New-Item *)",
+      "PowerShell(git *)",
+      "Bash(git *)",
+      "Bash(Remove-Item \"D:/Ti_280039_Work_Space/F2800157-LLC30K/*\" *)",
+      "Bash(Copy-Item * \"D:/Ti_280039_Work_Space/F2800157-LLC30K/*\" *)",
+      "Bash(Get-ChildItem -Path \"D:/Ti_280039_Work_Space/F2800157-LLC30K\" -Recurse -Include \"*.tar.gz\",\"*.zip\",\"*.tar\",\"*.gz\")",
+      "Bash(Select-Object FullName)",
+      "PowerShell(Get-ChildItem -Path \"D:\\\\Ti_280039_Work_Space\\\\F2800157-LLC30K\" -Recurse | Where-Object { $_.Name -match \"\\\\.\\(tar\\\\.gz|zip|tar|gz\\)$\" } | Select-Object FullName)",
+      "Bash(xargs rm -f)"
     ]
   }
 }
