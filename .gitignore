@@ -1,0 +1,38 @@
+# 빌드 출력물
+CPU1_LAUNCHXL_FLASH/
+CPU1_LAUNCHXL_RAM/
+*.out
+*.map
+*.obj
+*.pp
+*.asm
+*_linkInfo.xml
+
+# SysConfig 자동 생성
+syscfg/
+
+# 백업 파일
+backup_*.tar.gz
+backup_*.zip
+*.zip
+BEGIN
+FLASH_BANK0_SEC2
+
+# 상태/메모 텍스트 (임시)
+STATUS_*.txt
+CHANGES_*.txt
+BACKUP_*.txt
+QUICK_REFERENCE_*.txt
+README_*.txt
+
+# driverlib 바이너리 (C2000Ware에서 재빌드 가능)
+device/driverlib/ccs/Debug/
+device/driverlib/ccs/Release/
+
+# CCS 임시
+.settings/
+RemoveCommand.bat
+makefile
+objects.mk
+sources.mk
+subdir*.mk

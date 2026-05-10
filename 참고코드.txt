@@ -1,0 +1,1122 @@
+#define _YYMMDD "251109"
+/*
+[변수 이름]
+    g_      global floating
+    gi_     global integer
+    gu_     global unsigned integer
+    g_xxx_flag   global floating flag
+    xxx_flag   global integer flag
+
+[매크로 정의]
+    숫자:     _XXX
+    함수:     대문자
+    action:  do_XXX
+    value:   val_XXX
+    HW 단자:   PIN_xxx, XXX_GPIOXX
+*/
+
+//=============================================================================
+// 1. 사용자 정의 모듈 헤더 (기능별 초기화 함수 등)
+//=============================================================================
+#include <f28003x_lin_gpt.h>  // ✅ 반드시 f28003x_device.h 이후에 포함
+#include <init_EPWM123.h>
+#include "key_print_digit_2506.h"
+#include "init_DSP_ADC.h"
+#include "init_SCIA_baudrate.h"
+#include "init_ADS8584S_GPIO_SPI.h"
+#include "init_GPIO_PNEPCH.h"
+
+//=============================================================================
+// 2. TI 제공 드라이버/장치 헤더
+//=============================================================================
+#include "driverlib.h"
+#include "device.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/adc.h"
+#include "sw_prioritized_isr_levels.h"
+#include <stdio.h>
+
+//=============================================================================
+// 3. TI 헤더 - 레지스터 정의 및 구조체
+//=============================================================================
+#include "f28003x_device.h"
+#include "f28003x_analogsubsys.h"
+#include "CG_cccv_control_dsp.h"
+#include "CG_self_test_dsp.h"
+
+#define _DONE_PHASE             5.0
+#define val_MAX(A,B)       ((A)>(B)?(A):(B))
+#define val_MIN(A,B)       ((A)<(B)?(A):(B))
+#define val_ABS(A)       ((A) >= 0 ? (A) : -(A))
+static inline float val_MAXMIN(float x, float max, float min)
+{
+    if (x > max) return max;
+    else if (x < min) return min;
+    else return x;
+}
+
+#define PRINT_F_VAR1(var)  print_s("\n\r" #var " = "); print_f(var)
+#define PRINT_F_VAR2(var)  print_s("\t| " #var " = "); print_f(var)
+#define PRINT_I_VAR1(var)  print_s("\n\r" #var " = "); print_i(var)
+#define PRINT_I_VAR2(var)  print_s("\t| " #var " = "); print_i(var)
+
+float   g_K_cal_IBAT =  0.997721f;
+float   g_K_cal_IBAT4 = 0.997721f;
+
+float   g_cal_VBATX_2V_dvm = 0;
+float   g_cal_VBATX_2V_raw = 0;
+float   g_cal_VBATX_4V_dvm = 0;
+float   g_cal_VBATX_4V_raw = 0;
+float   g_cal_VBATX_slope =  1.0;
+float   g_cal_VBATX_offset =  0.0;
+
+
+float   g_IBAT4_offset = 0;
+float   g_IBAT_offset = 0;
+#define _VBAT_offset  (-0.001549)
+
+uint16_t   gu_dsp_adc_watch_dog_cnt = 0;  // clear in dsp_adc_interrupt
+
+#include "main_define.h"
+
+#define _T_1msec   1.0e-3
+#define _T_epwm  10.0e-6    //3u -> 330kHz, 5usec -> 200kHz, 10usec ->100kHz
+#define  V_CMD_MAX_main   6.0f
+#define  V_CMD_MIN_main   2.0f
+
+
+
+// run mode define
+typedef enum {
+    _OPEN_LOOP = 0,
+    _CC_CV,
+    _PULSE
+} Run_mode_typedef;
+Run_mode_typedef gi_operation_mode = _OPEN_LOOP;
+
+
+const char* state_names[] = {
+    "_STANDBY      ",
+    "_PRE_CHARGE   ",
+    "_STOP         ",
+    "_RUN          ",
+    "_TRIP         "
+};
+// State 정의
+typedef enum {
+    _STANDBY = 0,
+    _PRE_CHARGE,
+    _STOP,
+    _RUN,
+    _TRIP,
+} Status_typedef;
+Status_typedef gi_State = _STANDBY;
+
+
+
+// Trip 정의
+typedef enum {
+    _NONE = 0,
+    _OVER_CURR_A,
+    _OVER_CURR_B,
+    _OVER_CURR_C,
+    _OVERV_VBAT,
+    _OVERV_VBATX,
+    _UNDERV_VBATX,
+    _P15_UV,
+    _VBAT_VBATX_DIFF,
+    _PRE_CHARGE_FAIL,
+    _DSP_ADC_ERROR
+} Trip_no_typedef;
+Trip_no_typedef gi_Trip_no = _NONE;
+// Trip 사유 문자열 배열
+#define TRIP_NAME_COUNT (sizeof(trip_names) / sizeof(trip_names[0]))
+const char* trip_names[] = {
+    " none           ",         // _NONE
+    "_OVER_CURR_A    ",         // _OVER_CURR_A
+    "_OVER_CURR_B    ",         // _OVER_CURR_B
+    "_OVER_CURR_C    ",         // _OVER_CURR_C
+    "_OVERV_VBAT     ",         // _OVERV_VBAT
+    "_OVERV_VBATX    ",         // _OVERV_VBATX
+    "_UNDERV_VBATX   ",         // _UNDERV_VBATX --> sensor open
+    "_P15_UV         ",         // _P15_UV
+    "_VBAT_VBATX_DIFF",         // _VBAT_VBATX_DIFF
+    "_PRE_CHARGE_FAIL",         // _PRE_CHARGE_FAIL
+    "_DSP_ADC_ERROR"
+};
+
+
+
+
+float   g_OC_ref = 50.0;
+float   g_CS_A_peak = 0;
+float   g_CS_B_peak = 0;
+float   g_CS_C_peak = 0;
+
+// DSP_ADC 변수
+float   g_VBAT, g_VBAT_adc, g_VBAT_adc_LPF=0, g_VBAT_LPF=0;
+float   g_CS_A, g_CS_A_adc;
+float   g_CS_B, g_CS_B_adc;
+float   g_CS_C, g_CS_C_adc;
+float   g_P15V, g_P15V_adc;
+float   g_N15V, g_N15V_adc;
+float   g_A5V,  g_A5V_adc;
+float   g_VIN,  g_VIN_adc;
+float   g_V_MS_gate,  g_V_MS_gate_J7, g_V_MS_gate_adc;
+float   g_VCHOA,g_VCHOA_adc;
+float   g_VCHOB,g_VCHOB_adc;
+float   g_VCHOC,g_VCHOC_adc;
+
+float   g_Buck_duty = 0.1;
+int     GEN2_flag = 0;
+int     CANR_pin = 0;
+int     MS_gate = 0;
+int     gi_Fan_Vcon = 0;    // 0, 1, 2
+float   g_Buck_LPF_10Hz = 0.0;
+
+float   g_T_trip = 0;
+float   g_T_run = 0;
+float   g_T_end = 1.0;
+
+float   g_CS_BAT = 0, g_CS_BAT_LPF = 0, g_CS_BAT_adc = 0;
+float   g_CS_BAT4 = 0, g_CS_BAT4_LPF = 0, g_CS_BAT4_adc = 0;
+float   g_VREF33_LPF = 0, g_VREF33_adc = 0;
+float   g_VBATX = 0, g_VBATX_LPF = 0, g_VBATX_adc = 0;
+float   g_VBATX_raw = 0, g_VBATX_raw_LPF = 0;
+
+// 상태 판별 헬퍼 함수
+inline bool is_standby(void)      { return gi_State == _STANDBY; }
+inline bool is_precharge(void)    { return gi_State == _PRE_CHARGE; }
+inline bool is_stop(void)         { return gi_State == _STOP; }
+inline bool is_run(void)          { return gi_State == _RUN; }
+inline bool is_trip(void)         { return gi_State == _TRIP; }
+inline bool is_vin_valid(void)    { return g_VIN > 5.0f; }
+inline bool is_CC_CV(void)        { return gi_operation_mode == _CC_CV; }
+inline bool is_PULSE(void)        { return gi_operation_mode == _PULSE; }
+inline bool is_OPEN_LOOP(void)    { return gi_operation_mode == _OPEN_LOOP; }
+
+
+float   g_Per_ePWM1 = 0;
+
+int gu_PWM123_CV_A = 0;
+int gu_PWM123_CV_B = 0;
+int gu_PWM123_CV_C = 0;
+const uint16_t gi_CV_max = (uint16_t)(6e7*_T_epwm*2.0);
+#define K_Ibal  (0.01f/15.f)// (0.1f/15.f), 250822 수정
+
+
+inline void update_PWM(void)
+{
+    if(is_precharge()){
+        g_cccv_run = 0;    // 초기화를 위해 한번은 0의 값을 가지고 실행됨
+
+        g_V_MS_gate = 15.;   //debug, not to invoke fault
+//        g_CS_A = g_CS_B = g_CS_C = 0;   //debug
+
+        CG_self_test();
+        g_self_test_run_flag = is_precharge();    // 초기화를 위해 한번은 0의 값을 가지고 실행됨
+
+        if(g_test_Trip_no > 0 && is_vin_valid() ) {
+            if(gi_Trip_no == _NONE) gi_Trip_no = _PRE_CHARGE_FAIL;
+            MS_gate = 0;    // 즉시 off
+        }
+/*        else{
+            g_mod = g_test_mod;
+            MS_gate = (int)g_test_MS_gate;
+            GEN1_flag = (int)g_test_GEN1_flag;
+        }
+        */
+    }
+    else{
+        g_self_test_run_flag = 0;    // 초기화를 위해 한번은 0의 값을 가지고 실행됨
+
+        if(is_OPEN_LOOP()){
+            do_LPF_GAMMA(g_Buck_LPF_10Hz, g_Buck_duty*is_run(), _GAMMA_20usec_10Hz);
+            g_mod = g_Buck_LPF_10Hz;
+
+            // GEN1
+            GPIO_writePin(GEN1_GPIO14, !is_run());  // 0 = ON, 1 = OFF
+        }
+        else{   // _CC_CV or _PULSE
+            g_Pulse_mode_flag = is_PULSE() ? 1.0f : 0;
+
+            CG_cccv_control();
+            g_cccv_run = is_run();    // 초기화를 위해 한번은 0의 값을 가지고 실행됨
+
+            // GEN1
+            if(is_run() && g_GEN1_ON_delay>0){
+                GPIO_writePin(GEN1_GPIO14, 0);  //0= ON, 1= OFF
+            }
+            else{
+                GPIO_writePin(GEN1_GPIO14, 1);  //0= ON, 1= OFF
+            }
+        }
+    }
+
+
+
+    static float mod_Ibal_a, mod_Ibal_b, mod_Ibal_c;
+    float fFCNM1 = (g_CS_A + g_CS_B + g_CS_C) * 0.333333f;
+
+    // 전류 벨런스 제어
+    mod_Ibal_a = val_MAXMIN((fFCNM1 - g_CS_A) * K_Ibal, 0.02f, -0.02f);
+    mod_Ibal_b = val_MAXMIN((fFCNM1 - g_CS_B) * K_Ibal, 0.02f, -0.02f);
+    mod_Ibal_c = val_MAXMIN((fFCNM1 - g_CS_C) * K_Ibal, 0.02f, -0.02f);
+
+
+    gu_PWM123_CV_A = val_MAXMIN((uint16_t)((g_mod + mod_Ibal_a) * g_Per_ePWM1), gi_CV_max, 1);
+    gu_PWM123_CV_B = val_MAXMIN((uint16_t)((g_mod + mod_Ibal_b) * g_Per_ePWM1), gi_CV_max, 1);
+    gu_PWM123_CV_C = val_MAXMIN((uint16_t)((g_mod + mod_Ibal_c) * g_Per_ePWM1), gi_CV_max, 1);
+
+    EPWM_setCounterCompareValue(EPWM1_BASE, EPWM_COUNTER_COMPARE_A, gu_PWM123_CV_A);
+    EPWM_setCounterCompareValue(EPWM2_BASE, EPWM_COUNTER_COMPARE_A, gu_PWM123_CV_B);
+    EPWM_setCounterCompareValue(EPWM3_BASE, EPWM_COUNTER_COMPARE_A, gu_PWM123_CV_C);
+}
+
+
+
+// 조건 함수
+inline bool is_over_current(float val, float ref) { return fabsf(val) > ref; }
+inline bool is_over_voltage(float val, float ref) { return val > ref; }
+inline bool is_under_voltage(float val, float ref) { return val < ref; }
+
+
+// Trip 검사 함수
+inline void check_Trip(void)
+{
+
+    if (gi_Trip_no == _NONE) {
+        gu_dsp_adc_watch_dog_cnt++;
+		if (gu_dsp_adc_watch_dog_cnt > 3) {
+			gi_Trip_no = _DSP_ADC_ERROR;
+			gu_dsp_adc_watch_dog_cnt = 0; // ← 반드시 리셋
+			return;
+		}
+
+		if (is_vin_valid() ) {
+			g_CS_A_peak = val_MAX(g_CS_A_peak, fabsf(g_CS_A));
+			g_CS_B_peak = val_MAX(g_CS_B_peak, fabsf(g_CS_B));
+			g_CS_C_peak = val_MAX(g_CS_C_peak, fabsf(g_CS_C));
+
+			if (is_over_current(g_CS_A, g_OC_ref)) gi_Trip_no = _OVER_CURR_A;
+			else if (is_over_current(g_CS_B, g_OC_ref)) gi_Trip_no = _OVER_CURR_B;
+			else if (is_over_current(g_CS_C, g_OC_ref)) gi_Trip_no = _OVER_CURR_C;
+			else if (is_over_voltage(g_VBAT_LPF, 7.0f)) gi_Trip_no = _OVERV_VBAT;
+			else if (is_over_voltage(g_VBATX_LPF, 7.0f)) gi_Trip_no = _OVERV_VBATX;
+			else if (is_under_voltage(g_VBATX_LPF, 1.5f)) gi_Trip_no = _UNDERV_VBATX;
+			else if (is_under_voltage(g_P15V, 13.0f)) gi_Trip_no = _P15_UV;
+		}
+    }
+
+    if (gi_Trip_no != _NONE) {
+        gi_State = _TRIP;
+    }
+
+
+    // GEN2
+    GPIO_writePin(GEN2_GPIO15, !GEN2_flag); //0= ON, 1= OFF
+
+    // MS, battery ON/OFF
+    GPIO_writePin(MSp_GPIO8, MS_gate);
+    GPIO_writePin(MSn_GPIO9, !MS_gate);
+
+}
+
+inline void ext_adc_scalling(void)
+{
+#define _IBAT_offset_BAND 0.3
+
+    g_CS_BAT4_adc = _EXT_ADC_SCALE_ * (float)(int16_t)SPI_readDataNonBlocking(SPI_BASE);
+    //Vadc = I*(0.35e-3*165.*4)/3.0
+    g_CS_BAT4 = g_CS_BAT4_adc*3.0f/(0.35e-3*165.*4.f)*g_K_cal_IBAT4;// + 0.04;
+    // 자동 전류 옵셋 보정
+    if(is_stop() || is_run())g_CS_BAT4 -= g_IBAT4_offset;
+    else if(g_CS_BAT4_LPF>-_IBAT_offset_BAND && g_CS_BAT4_LPF<_IBAT_offset_BAND)g_IBAT4_offset = g_CS_BAT4_LPF;
+    do_LPF_GAMMA(g_CS_BAT4_LPF, g_CS_BAT4, _GAMMA_20usec_10Hz);
+
+
+    g_CS_BAT_adc = _EXT_ADC_SCALE_ * (float)(int16_t)SPI_readDataNonBlocking(SPI_BASE);
+    //Vadc = -I*(0.35e-3*165.)/3.0
+    g_CS_BAT = -g_CS_BAT_adc*3.0f/(0.35e-3*165.)*g_K_cal_IBAT;// + 0.08;
+    // 자동 전류 옵셋 보정
+    if(is_stop() || is_run())g_CS_BAT -= g_IBAT_offset;
+    else if(g_CS_BAT_LPF>-_IBAT_offset_BAND && g_CS_BAT_LPF<_IBAT_offset_BAND)g_IBAT_offset = g_CS_BAT_LPF;
+    do_LPF_GAMMA(g_CS_BAT_LPF, g_CS_BAT, _GAMMA_20usec_10Hz);
+
+
+
+    g_VBATX_adc     = _EXT_ADC_SCALE_ * (float)(int16_t)SPI_readDataNonBlocking(SPI_BASE);
+    //Vadc = V*(40./40.2);
+    g_VBATX_raw = g_VBATX_adc*(40.2/40.);
+    do_LPF_GAMMA(g_VBATX_raw_LPF, g_VBATX_raw, _GAMMA_20usec_10Hz);
+
+    g_VBATX = g_cal_VBATX_slope * g_VBATX_raw + g_cal_VBATX_offset;
+    g_VBATX_LPF = g_cal_VBATX_slope * g_VBATX_raw_LPF + g_cal_VBATX_offset;
+
+
+
+    g_VREF33_adc     = _EXT_ADC_SCALE_ * (float)(int16_t)SPI_readDataNonBlocking(SPI_BASE);
+    do_LPF_GAMMA(g_VREF33_LPF, g_VREF33_adc, _GAMMA_20usec_10Hz);
+}
+
+
+inline void dsp_adc_scalling(void)
+{
+    g_VIN_adc = (float)gu_VIN * _DSP_ADC_SCALE_;
+    //Vadc = V*(2.4/30.)
+    g_VIN = (g_VIN_adc - _REF165_)/(2.4/30.);
+
+    g_VBAT_adc = (float)gu_VBAT * _DSP_ADC_SCALE_;
+    do_LPF_GAMMA(g_VBAT_adc_LPF, g_VBAT_adc, _GAMMA_20usec_10Hz);
+    //Vadc = V*(2./10.)
+    g_VBAT = (g_VBAT_adc_LPF - _REF165_)/(2./10.)*1.0;
+
+    g_V_MS_gate_adc = (float)gu_V_MS_gate * _DSP_ADC_SCALE_;
+    //Vadc = V_J7*(10./11.)
+    g_V_MS_gate_J7 = g_V_MS_gate_adc/(10./11.);
+    //Vadc = V_100K*(10./111.)
+    g_V_MS_gate = g_V_MS_gate_adc/(10./111.);
+
+    g_VCHOA_adc = (float)gu_VCHOA * _DSP_ADC_SCALE_;
+    //Vadc = V*(2.4/12.4)
+    g_VCHOA = g_VCHOA_adc/(2.4/12.4);
+
+    g_VCHOB_adc = (float)gu_VCHOB * _DSP_ADC_SCALE_;
+    //Vadc = V*(2.4/12.4)
+    g_VCHOB = g_VCHOB_adc/(2.4/12.4);
+
+    g_VCHOC_adc = (float)gu_VCHOC * _DSP_ADC_SCALE_;
+    //Vadc = V*(2.4/12.4)
+    g_VCHOC = g_VCHOC_adc/(2.4/12.4);
+
+    g_CS_A_adc = (float)gu_CS_A * _DSP_ADC_SCALE_;
+    //Vadc = I*(0.35e-3*165.*3.01/10.) + 1.65
+    g_CS_A = (g_CS_A_adc - _REF165_)/(0.35e-3*165.*3.01/10.);
+
+    g_CS_B_adc = (float)gu_CS_B * _DSP_ADC_SCALE_;
+    //Vadc = I*(0.35e-3*165.*3.01/10.) + 1.65
+    g_CS_B = (g_CS_B_adc - _REF165_)/(0.35e-3*165.*3.01/10.);
+
+    g_CS_C_adc = (float)gu_CS_C * _DSP_ADC_SCALE_;
+    //Vadc = I*(0.35e-3*165.*3.01/10.) + 1.65
+    g_CS_C = (g_CS_C_adc - _REF165_)/(0.35e-3*165.*3.01/10.);
+
+    g_P15V_adc = (float)gu_P15V * _DSP_ADC_SCALE_;
+    //Vadc = V*(0.5/10.5) + 1.65
+    g_P15V = g_P15V_adc/(0.5/10.5);
+
+    g_N15V_adc = (float)gu_N15V * _DSP_ADC_SCALE_;
+    //Vadc = 1.65 - 0.5*(1.65 + V)/10.5, V = (10.5/0.5)*(Vadc - 1.65) - 1.65
+    g_N15V = -((10.5/0.5)*(_REF165_ - g_N15V_adc) - _REF165_);
+
+    g_A5V_adc = (float)gu_A5V * _DSP_ADC_SCALE_;
+    //Vadc = V*(0.1/0.6)
+    g_A5V = g_A5V_adc/(0.1/0.6);
+}
+
+// %%%% = update_PWM()
+//           |<--- ISR ----->|
+// SOC      _|_/---%%%%%---\_|__________________
+// CSn      _|_/---%%%%%---\_|__________________
+// BUSY     _|__/--%%%%%--\__|__________________
+// SCLK     -|---------------|\/\/\/\/\/\/\/----
+inline void ADS8584S_trigger_check_Trip(void)
+{
+    static int cnt_PIN_ADC_BUSY_wait = 0;
+
+    //ADS8584S conversion trigger
+    GPIO_writePin(PIN_ADC_SOC, 1);
+    GPIO_writePin(PIN_ADC_CSn, 1);
+
+    ext_adc_scalling();    // 이전 싸이클에ㅛㅓ 트리거한 adc 데이터 수확
+
+    dsp_adc_scalling();
+
+    check_Trip();   // ad 변환하는 시간 동안
+
+    for(cnt_PIN_ADC_BUSY_wait = 0;
+        GPIO_readPin(PIN_ADC_BUSY) == 1 && cnt_PIN_ADC_BUSY_wait < 10;
+        cnt_PIN_ADC_BUSY_wait++) {
+        DEVICE_DELAY_US(1);
+    }
+
+    GPIO_writePin(PIN_ADC_SOC, 0);
+    GPIO_writePin(PIN_ADC_CSn, 0);
+
+    //clear SPI FIFO
+    SPI_disableFIFO(SPI_BASE);
+    SPI_enableFIFO(SPI_BASE);
+
+    //generate SCLK for next ISR read
+    SPI_writeDataNonBlocking(SPI_BASE, 0xFFFF);
+    SPI_writeDataNonBlocking(SPI_BASE, 0xFFFF);
+    SPI_writeDataNonBlocking(SPI_BASE, 0xFFFF);
+    SPI_writeDataNonBlocking(SPI_BASE, 0xFFFF);
+}
+
+
+
+__interrupt void EPWM1_ISR(void)    // 50 kHz
+{
+
+    GPIO_writePin(LED_GPIO55,1);
+
+    //ADS8584S conversion trigger
+    ADS8584S_trigger_check_Trip();
+
+    //CCCV control and update PWM
+    update_PWM();
+
+    GPIO_writePin(LED_GPIO55,0);
+    // ePWM1 인터럽트 플래그 클리어
+    EPWM_clearEventTriggerInterruptFlag(EPWM1_BASE);
+    Interrupt_clearACKGroup(INTERRUPT_ACK_GROUP3);
+}
+
+
+// 타이머 인터럽트 핸들러 함수
+__interrupt void timer1ISR(void)
+{
+    EINT;
+
+    // Trip 처리
+    if (is_trip()) {
+        if ((g_T_trip += _T_1msec) > 1.0f) {    // delayed off
+            MS_gate = 0;
+        }
+    } else {
+        g_T_trip = 0;
+    }
+
+
+    // 상태 전이
+    if (gi_Trip_no > 0 /* 또는 g_test_Trip_no 포함 시 */) {
+        gi_State = _TRIP;
+
+    } else if (is_precharge() && g_test_phase_no == _DONE_PHASE) {
+        gi_State = _STOP;
+        MS_gate = 1;
+    }
+
+    if (is_run()) {
+        g_T_run += _T_1msec;
+        if (g_T_end > 0 && g_T_run > g_T_end) gi_State = _STOP;
+    } else {
+        g_T_run = 0;
+    }
+
+
+    // FAN 제어
+    if (is_run()) {
+        gi_Fan_Vcon = 2;
+    }
+    else {
+        gi_Fan_Vcon = 0;
+    }
+
+
+//#define _FAN_TEST_MODE
+#ifdef _FAN_TEST_MODE
+    //test mode
+    GPIO_togglePin(FANp_GPIO6);
+    GPIO_togglePin(FANn_GPIO7);
+#else
+    //real mode
+    GPIO_writePin(FANp_GPIO6, gi_Fan_Vcon>0);
+    GPIO_writePin(FANn_GPIO7, gi_Fan_Vcon==2);
+#endif
+
+
+    CPUTimer_clearOverflowFlag(CPUTIMER1_BASE);
+    Interrupt_clearACKGroup(INTERRUPT_ACK_GROUP1);
+}
+
+
+// 타이머 설정 함수
+void initTimer1(float T_per)
+{
+    // 타이머 초기화
+    CPUTimer_setPeriod(CPUTIMER1_BASE, DEVICE_SYSCLK_FREQ*T_per);
+    CPUTimer_stopTimer(CPUTIMER1_BASE);
+    CPUTimer_reloadTimerCounter(CPUTIMER1_BASE);
+    CPUTimer_startTimer(CPUTIMER1_BASE);
+
+    // 인터럽트 설정
+    Interrupt_register(INT_TIMER1, &timer1ISR);
+    Interrupt_enable(INT_TIMER1);
+    CPUTimer_enableInterrupt(CPUTIMER1_BASE);
+}
+
+
+//=============================================================================
+// 공통 화면 제어 함수
+//=============================================================================
+void clear_screen(void)
+{
+    print_s("\033[2J");   // 전체 화면 지우기
+}
+
+void hide_cursor(void)
+{
+    print_s("\033[?25l"); // 커서 숨김
+}
+
+void show_cursor(void)
+{
+    print_s("\033[?25h"); // 커서 보임
+}
+
+void cursor_home(void)
+{
+    print_s("\033[H");    // 커서 홈 위치로 이동
+}
+
+
+void Oper_mode_select(void)
+{
+    while (1) {
+        clear_screen();
+
+        print_s("\n\r>> [O]Open Loop, [C]CC_CV, [P]Pulse");//clear screen
+        print_s("\n\r        Select ...");
+
+        char key = getchar1();
+
+        // 대문자는 소문자로 변환
+        if (key >= 'A' && key <= 'Z') key = key - 'A' + 'a';
+
+        if (key == 'o') {
+            gi_operation_mode = _OPEN_LOOP;
+            break;
+        }
+        else if (key == 'c') {
+            gi_operation_mode = _CC_CV;
+            g_Is_auto_tau = 0;
+            g_K_tau_cc_manual_R = g_K_tau_cc_manual_F = 0.2;
+            break;
+        }
+        else if (key == 'p') {
+            gi_operation_mode = _PULSE;
+            g_Is_auto_tau = 1.0;
+            break;
+        }
+        // 그 외 키는 무시하고 루프 계속
+    }
+
+    clear_screen();
+}
+
+
+
+void Status_display(void)
+{
+    cursor_home();
+    hide_cursor();
+
+    print_s(   "======================================");
+    print_s("\n\r=    PNE Pulse Charger ");print_s(_YYMMDD);
+    print_s("\n\r=    gi_operation_mode = ");
+    if(is_OPEN_LOOP()) print_s("_OPEN_LOOP");
+    else if(is_CC_CV()) print_s("_CC_CV");
+    else print_s("_PULSE");
+    print_s("\n\r======================================");
+    print_s("\n\r[P]precharge, [R]run, [S]stop, [E]reset");
+    if(gi_State == _STANDBY){
+        print_s(", [M]operation Mode");
+    }
+    else{
+        print_s("                   ");
+    }
+
+
+    print_s("\n\r gi_State = ");
+    print_s(state_names[gi_State]);
+
+    // Trip 종류 표시
+    // 출력 코드
+    print_s("\t   gi_Trip_no = ");
+    if (gi_Trip_no < TRIP_NAME_COUNT) print_s(trip_names[gi_Trip_no]);
+    else print_s(" ???            ");
+
+
+
+    print_s(" g_test_Trip_no = "); print_i(g_test_Trip_no); print_s("    ");
+
+
+    print_s("\n\r[T]T_end    = ");print_f(g_T_end);print_s("sec, ");
+       print_s("T_run   = ");print_f(g_T_run);print_s("sec     ");
+    print_s("\n\r[O]g_OC_ref     = ");print_f(g_OC_ref);
+
+    if(is_OPEN_LOOP()){
+        print_s("\n\r[B]Buck_duty = ");print_f(g_Buck_duty);
+    }
+    else{
+        print_s("\n\r[V]g_V_cmd      = ");print_f(g_V_cmd);
+        print_s("\n\r[I]g_I_cmd      = ");print_f(g_I_cmd);
+    }
+
+    if(is_PULSE()){
+        print_s("\n\r[N]g_I_cmd_notch  = ");print_f(g_I_cmd_notch);
+        print_s("\n\r[B]g_T_period   = ");print_f(g_T_period);
+        print_s("\n\r[C]g_T_notch    = ");print_f(g_T_notch);
+        //print_s("\n\r[H]g_T_period_hold    = ");print_f(g_T_period_hold);
+        print_s("\n\r[A]g_Is_auto_tau    = ");print_i((int)g_Is_auto_tau);
+    }
+
+    if(is_CC_CV() || is_PULSE()){
+        print_s("\n\r[0]g_K_cal_IBAT4= ");print_f(g_K_cal_IBAT4);
+        print_s("\n\r[1]g_K_cal_IBAT = ");print_f(g_K_cal_IBAT);
+        print_s("\n\r[2]g_cal_VBATX_2V_dvm = ");print_f(g_cal_VBATX_2V_dvm);PRINT_F_VAR2(g_cal_VBATX_slope);
+        print_s("\n\r[3]g_cal_VBATX_4V_dvm = ");print_f(g_cal_VBATX_4V_dvm);PRINT_F_VAR2(g_cal_VBATX_offset);
+        print_s("\n\r[6]g_K_Kp_set = ");print_f(g_K_Kp_set);
+        print_s("\n\r[7]g_K_tau_cc_manual_R = ");print_f(g_K_tau_cc_manual_R);
+        print_s("\n\r[8]g_K_tau_cc_manual_F = ");print_f(g_K_tau_cc_manual_F);
+    }
+
+    print_s("\n\r[G]CANR_pin   = ");print_i(CANR_pin);
+
+}
+
+
+// NTC: TX08F103F3435ER, 20~100도, ±0.8%
+float NTC10K_Temp(float V)
+{
+#define _V_NTC_DIV_MAX   (3.3*12.45/(10+12.45))  //R_NTC_20oC = 12.45 Kohm
+
+    // 4차 다항식 계수 (20~95°C, 10kΩ NTC 기준)
+    const float a4 =  1.902811e+01;  // V^4
+    const float a3 = -9.915282e+01;  // V^3
+    const float a2 =  1.952721e+02;  // V^2
+    const float a1 = -2.047427e+02;  // V^1
+    const float a0 =  1.351792e+02;  // 상수항
+
+    // Horner's method
+    if (V>_V_NTC_DIV_MAX)V = _V_NTC_DIV_MAX;
+    return (((a4 * V + a3) * V + a2) * V + a1) * V + a0;
+}
+
+
+void ADC_DIN_display(void)
+{
+    float   fVadc;
+
+    print_s("\n\rVariables ------------------------------------");
+        PRINT_F_VAR1(g_mod);PRINT_F_VAR2(P_I_cmd_PICV);
+        PRINT_F_VAR1(P_K_tau_cc_auto_R);PRINT_F_VAR2(P_K_tau_cc_auto_F);PRINT_F_VAR2(P_K_tau_apply);
+        //PRINT_F_VAR1(g_test_phase_no);
+        PRINT_F_VAR1(P_phase_timer_);
+
+
+    PRINT_I_VAR1(GEN2_flag);
+    PRINT_I_VAR1(gi_Fan_Vcon);
+    PRINT_I_VAR1(MS_gate);
+    print_s("\n\r T_epwm = ");print_i(_T_epwm*1e6);print_s("usec");
+      print_s(", T_con = ");print_i(T_con*1e6);print_s("usec");
+
+    PRINT_I_VAR1(gu_PWM123_CV_A); PRINT_I_VAR2(gu_PWM123_CV_B); PRINT_I_VAR2(gu_PWM123_CV_C);
+
+    print_s("\n\rEXT_ADC(16 bit) ------------------------------");
+
+    print_s("\n\r CS_BAT4(Tp1) = ");
+       print_f(g_CS_BAT4_adc);print_s(", ");
+       print_f(g_CS_BAT4);print_s("A,  ");
+       print_f6(g_CS_BAT4_LPF);print_s("Aavg  ");
+
+    print_s("\n\r CS_BAT(Tp5)  = ");
+       print_f(g_CS_BAT_adc);print_s(", ");
+       print_f(g_CS_BAT);print_s("A,  ");
+       print_f6(g_CS_BAT_LPF);print_s("Aavg  ");
+
+    print_s("\n\r VBATX(Tp9)   = ");
+        print_f6(g_VBATX_adc);print_s(", ");
+        print_f6(g_VBATX);print_s("V,  ");
+        print_f6(g_VBATX_LPF);print_s("Vavg  ");
+
+    print_s("\n\r VREF33(Tp17) = ");
+        print_f6(g_VREF33_adc);print_s(", ");
+        print_f6(g_VREF33_LPF);print_s("Vavg  ");
+
+    print_s("\n\rDSP_ADC(12 bit) ------------------------------");
+    print_s("\n\r VIN(Tp4)     = ");
+        print_f(g_VIN_adc);print_s(", ");
+        print_f(g_VIN);print_s("V  ");
+
+
+    print_s("\n\r VBAT(Tp18)   = ");
+        print_f(g_VBAT_adc_LPF);print_s("avg, "); print_f(g_VBAT);print_s("V   ");
+
+    print_s("\n\r VCHOA(Tp8)   = ");
+        fVadc = (float)gu_VCHOA * _DSP_ADC_SCALE_;
+        print_f(fVadc);print_s(", "); print_f(g_VCHOA);print_s("V  ");
+
+        print_s("\t| CS_A(Tp21) = ");
+        print_f(g_CS_A_adc);print_s(", ");print_f(g_CS_A);print_s("A,  ");print_f(g_CS_A_peak);print_s("Apk  ");
+
+    print_s("\n\r VCHOB(Tp19)  = ");
+        fVadc = (float)gu_VCHOB * _DSP_ADC_SCALE_;
+        print_f(fVadc);print_s(", "); print_f(g_VCHOB);print_s("V  ");
+
+        print_s("\t| CS_B(Tp23) = ");
+        print_f(g_CS_B_adc);print_s(", ");print_f(g_CS_B);print_s("A,  ");print_f(g_CS_B_peak);print_s("Apk  ");
+
+    print_s("\n\r VCHOC(Tp24)  = ");
+        fVadc = (float)gu_VCHOC * _DSP_ADC_SCALE_;
+        print_f(fVadc);print_s(", "); print_f(g_VCHOC);print_s("V  ");
+
+        print_s("\t| CS_C(Tp15) = ");
+        print_f(g_CS_C_adc);print_s(", ");print_f(g_CS_C);print_s("A,  ");print_f(g_CS_C_peak);print_s("Apk  ");
+
+    print_s("\n\r VBAT_DIFFN(Tp26)  = ");
+        fVadc = (float)gu_VBAT_DIFFN * _DSP_ADC_SCALE_;
+        print_f(fVadc);print_s(", ");
+        //fVadc = V*(2./10.) + 1.65
+        print_f((fVadc - _REF165_)/(2./10.));print_s("V  ");
+
+    print_s("\n\r V_MS_gate(Tp47)   = ");
+        fVadc = (float)gu_V_MS_gate * _DSP_ADC_SCALE_;
+        print_f(fVadc);
+        print_s(", V_MS_gate_J7 = ");print_f(g_V_MS_gate_J7);
+        print_s("V, V_MS_gate_BUCK = ");print_f(g_V_MS_gate);print_s("V  ");
+
+
+    print_s("\n\r NTC10K1(Tp20, SW)\t= ");
+        fVadc = (float)gu_NTC10K1 * _DSP_ADC_SCALE_;
+        print_f(fVadc);print_s("V, ");
+        print_f(NTC10K_Temp(fVadc));print_s("oC ");
+
+        print_s("\t| NTC10K2(Tp27, MS) = ");
+            fVadc = (float)gu_NTC10K2 * _DSP_ADC_SCALE_;
+            print_f(fVadc);print_s("V, ");
+            print_f(NTC10K_Temp(fVadc));print_s("oC ");
+
+    print_s("\n\r NTC5K1(Tp25)\t= ");   print_f((float)gu_NTC5K1 * _DSP_ADC_SCALE_);
+        print_s("\t| NTC5K2(Tp14)  = ");  print_f((float)gu_NTC5K2 * _DSP_ADC_SCALE_);
+
+
+
+    if(is_OPEN_LOOP()){
+        print_s("\n\r P15V(Tp40)\t= ");
+            print_f(g_P15V_adc);print_s(", ");
+            print_f(g_P15V);print_s("V  ");
+
+        print_s("\n\r A5V(Tp41)\t= ");
+            print_f(g_A5V_adc);print_s(", ");
+            print_f(g_A5V);print_s("V  ");
+
+        print_s("\n\r N15V(Tp42)\t= ");
+            print_f(g_N15V_adc);print_s(", ");
+            print_f(g_N15V);print_s("V  ");
+
+        print_s("\n\rDIN ------------------------------------------");
+        print_s("\n\r FAN_TACO1\t= "); print_i((int)GPIO_readPin(FAN_TACO1_GPIO41));
+        print_s("\n\r FAN_TACO2\t= "); print_i((int)GPIO_readPin(FAN_TACO2_GPIO40));
+        print_s("\n\r ESTOP\t\t= "); print_i((int)GPIO_readPin(ESTOP_GPIO44));
+    }
+
+    print_s("\r\n\n");
+    static int cur_cnt = 0, i;
+    cur_cnt = cur_cnt%10 + 1;
+    for(i=0;i<cur_cnt;i++) putchar('>');
+    for(;i<10;i++) putchar(' ');
+}
+
+
+void Key_process(char key)
+{
+	float ftmp;
+	int i;
+
+    print_s("\r");
+    show_cursor();
+
+	// 대문자는 소문자로 변환
+	if (key >= 'A' && key <= 'Z') key = key - 'A' + 'a';
+
+	if(key == '\r') clear_screen();
+	// 운전 모드 선택 (STANDBY에서만 가능)
+
+	if (key == 'm' && gi_State == _STANDBY) {
+		Oper_mode_select();
+	}
+	// PRE_CHARGE 시작 (STANDBY에서만)
+	else if (key == 'p' && gi_State == _STANDBY) {
+	    gi_State = _PRE_CHARGE;
+	    GEN2_flag = 1;
+	}
+	// RUN 시작 (PRE_CHARGE 또는 STOP 상태에서)
+	else if (key == 'r' && is_stop() ) {
+        gi_State = _RUN;
+        g_CS_A_peak = g_CS_B_peak = g_CS_C_peak = 0;
+	}
+	// TRIP 해제 및 STANDBY로 복귀
+	else if (key == 'e' && (is_trip()  || is_precharge() || is_stop() )) {
+        gi_State = _STANDBY;
+
+	    gi_Trip_no = _NONE;
+	    g_test_Trip_no = 0;
+        GEN2_flag = 0;
+        MS_gate = 0;
+        g_CS_A_peak = g_CS_B_peak = g_CS_C_peak = 0;
+	}
+	// RUN 중지
+	else if (key == 's' && is_run() ) {
+		gi_State = _STOP;
+	}
+	// 설정: g_T_end
+	else if (key == 't' && !is_run() ) {
+		print_s("\r>> T_end = ");
+		ftmp = input_f();
+		g_T_end = val_MAXMIN(ftmp, 36000.f, 0);  // 10 시간
+	}
+	// 설정: g_OC_ref
+	else if (key == 'o' && !is_run() ) {
+		print_s("\r>> g_OC_ref = ");
+		ftmp = input_f();
+		if (ftmp > 0){
+		    if(is_OPEN_LOOP() ){
+		        g_OC_ref = val_MAXMIN(ftmp, 80.f, 20.f);
+		    }
+		    else{
+		        g_OC_ref = val_MAXMIN(ftmp, 80.f, g_I_cmd*0.5f);
+		    }
+		}
+	}
+	// ===== 운전 모드별 세부 입력 =====
+	// Open Loop 모드에서 입력: Buck_duty
+	if(is_OPEN_LOOP()){
+	    if(key == 'b'){
+	        print_s("\r>> Buck_duty = ");
+	        ftmp = input_f();
+	        if (ftmp > 0) {
+	            g_Buck_duty = val_MAXMIN(ftmp, 0.5f, 0.001f);
+	        }
+	    }
+/*	    else if(key == 'f'){
+            print_s("\r>> gi_Fan_Vcon = ");
+            ftmp = input_f();
+            ftmp = val_MAXMIN(ftmp, 3.0f, 0);
+            gi_Fan_Vcon = (int)ftmp;
+        }*/
+	    else if(key == 'g'){
+	        do_TOGGLE(CANR_pin);
+	        GPIO_writePin(CANR_GPIO34, CANR_pin);
+        }
+	}
+	else{   // _CC_CV, _PULSE 모드
+        // Pulse 모드일 때만 입력 가능: notch, period, notch duration
+        if (is_PULSE() && !is_run() ) {
+            if (key == 'n') {
+                print_s("\r>> g_I_cmd_notch = ");
+                ftmp = input_f();
+                g_I_cmd_notch = val_MAXMIN(ftmp, g_I_cmd, -200.f);
+
+            }
+            else if (key == 'b') {
+                print_s("\r>> g_T_period = ");
+                ftmp = input_f();
+                if (ftmp > 0){
+                    g_T_period = val_MAXMIN(ftmp, 0.5f, 2.e-3f);
+                    g_T_notch = g_T_period*0.5;
+                }
+            }
+            else if (key == 'c') {
+                print_s("\r>> g_T_notch = ");
+                ftmp = input_f();
+                if (ftmp > 0) g_T_notch = val_MAXMIN(ftmp, (0.5f*g_T_period),  0.001f);
+            }
+            /*
+            else if (key == 'h') {
+                print_s("\r>> g_T_period_hold = ");
+                ftmp = input_f();
+                if (ftmp > 0)g_T_period_hold = val_MAXMIN(ftmp, 0.5f, 0.1f);
+            }
+            */
+            else if (key == 'a') {
+                print_s("\r>> g_Is_auto_tau = ");
+                ftmp = input_f();
+                if (ftmp > 0)g_Is_auto_tau = 1.0;
+                else g_Is_auto_tau = 0;
+            }
+        }
+
+        //V_cmd
+        if (key == 'v') {
+            print_s("\r>> g_V_cmd = ");
+            ftmp = input_f();
+            if (ftmp > 0) g_V_cmd = val_MAXMIN(ftmp, V_CMD_MAX_main, V_CMD_MIN_main);
+        }
+        //I_cmd
+        else if(key == 'i') {
+            print_s("\r>> g_I_cmd = ");
+            ftmp = input_f();
+            if (ftmp > 0)g_I_cmd = val_MAXMIN(ftmp, 200.f, 0);
+            g_OC_ref = 80.f;
+        }
+	}
+
+    // _CC_CV  모드에서 IBAT 측정치 교정
+    if (is_CC_CV()) {
+        if ( key == '0' && is_run()) {
+            print_s("\r>> enter IBAT4_exact_value = ");
+            ftmp = input_f();
+            if (ftmp > 0 && (g_CS_BAT4_LPF > 1.0)){
+                g_K_cal_IBAT4 *= val_MAXMIN(ftmp/g_CS_BAT4_LPF, 1.05f, 0.95f);
+            }
+        }
+        else if ( key == '1' && is_run()) {
+            print_s("\r>> enter IBAT_exact_value = ");
+            ftmp = input_f();
+            if (ftmp > 0 && (g_CS_BAT_LPF > 1.0)){
+                g_K_cal_IBAT *= val_MAXMIN(ftmp/g_CS_BAT_LPF, 1.05f, 0.95f);
+            }
+        }
+    }
+
+
+    // VBATX calibration
+    if (is_standby()) {
+
+        if (key == '2') {
+            print_s("\r>> enter VBATX_exact_value(2.0~2.9) = ");
+            ftmp = input_f();
+            if (ftmp >= 2.0 && ftmp <= 2.9) {
+                g_cal_VBATX_2V_dvm = ftmp;        // DVM으로 입력한 실제 전압
+                g_cal_VBATX_2V_raw = g_VBATX_raw_LPF; // ADC로 측정한 원래값
+            }
+        }
+        else if (key == '3') {
+            print_s("\r>> enter VBATX_exact_value(4.0~4.5) = ");
+            ftmp = input_f();
+            if (ftmp >= 4.0 && ftmp <= 4.5) {
+                g_cal_VBATX_4V_dvm = ftmp;
+                g_cal_VBATX_4V_raw = g_VBATX_raw_LPF;
+            }
+        }
+
+        // 두 포인트 보정값이 모두 입력된 경우 슬로프 및 오프셋 계산
+        if (g_cal_VBATX_2V_dvm > 0 && g_cal_VBATX_4V_dvm > 0) {
+            float diff_raw = g_cal_VBATX_4V_raw - g_cal_VBATX_2V_raw;
+            float g_cal_VBATX_slope_tmp = 0.0f;
+            float g_cal_VBATX_offset_tmp = 0.0f;
+
+            if (fabsf(diff_raw) > 1e-6f) {
+                g_cal_VBATX_slope_tmp  = (g_cal_VBATX_4V_dvm - g_cal_VBATX_2V_dvm) / diff_raw;
+                g_cal_VBATX_offset_tmp = g_cal_VBATX_2V_dvm - g_cal_VBATX_slope_tmp * g_cal_VBATX_2V_raw;
+            }
+
+            if (g_cal_VBATX_slope_tmp >= 0.97f && g_cal_VBATX_slope_tmp <= 1.03f &&
+                g_cal_VBATX_offset_tmp >= -0.3f && g_cal_VBATX_offset_tmp <= 0.3f)
+            {
+                g_cal_VBATX_slope  = g_cal_VBATX_slope_tmp;
+                g_cal_VBATX_offset = g_cal_VBATX_offset_tmp;
+            }
+            else{
+                print_s("\t\r>> 유효한 값이 아닙니다.                "); PRINT_F_VAR2(g_cal_VBATX_slope_tmp); PRINT_F_VAR2(g_cal_VBATX_offset_tmp);
+                getchar1();
+                putchar('\r');
+                for(i=0;i<130;i++)putchar(' ');
+            }
+        }
+    }
+
+
+
+    // _CC_CV or _PULSE 모드에서 제어 변수 수정
+    if (is_CC_CV() || is_PULSE() ) {
+        if ( is_standby() || is_run() || is_stop()) {
+            if ( key == '6') {
+                print_s("\r>> g_K_Kp_set = ");
+                ftmp = input_f();
+                if (ftmp>0){
+                    g_K_Kp_set = val_MAXMIN(ftmp, 3.0f, 0.3f);  //normal value = 1.0
+                }
+            }
+            else if ( key == '7') {
+                print_s("\r>> g_K_tau_cc_manual_R = ");
+                ftmp = input_f();
+                if (ftmp>0){
+                    g_K_tau_cc_manual_R = val_MAXMIN(ftmp, 2.0f, 0.2f);  //normal value = 1.0
+                }
+            }
+            else if ( key == '8') {
+                print_s("\r>> g_K_tau_cc_manual_F = ");
+                ftmp = input_f();
+                if (ftmp>0){
+                    g_K_tau_cc_manual_F = val_MAXMIN(ftmp, 2.0f, 0.2f);  //normal value = 1.0
+                }
+            }
+        }
+    }
+
+
+    hide_cursor();
+    putchar('\r');
+    for(i=0;i<120;i++) putchar(' ');
+}
+
+
+
+//================================================================================
+void main(void)
+{
+
+    // 시스템 초기화
+    Device_init();
+    Device_initGPIO();
+    Interrupt_initModule();
+    Interrupt_initVectorTable();
+
+
+    // GPIO 초기화
+    init_GPIO_PNEPCH();
+
+    // HW 초기화
+    gi_State = _STANDBY;
+    GPIO_writePin(GEN1_GPIO14, !is_run());   //0= ON, 1= OFF
+
+    GEN2_flag = 0;
+    GPIO_writePin(GEN2_GPIO15, !GEN2_flag);  //0= ON, 1= OFF
+
+    MS_gate = 0;    //0= OFF, 1= ON
+    GPIO_writePin(MSp_GPIO8, MS_gate);
+    GPIO_writePin(MSn_GPIO9, !MS_gate);
+
+
+
+    // 톱니파 삼각파, ePWM 및 인터럽트 초기화
+    g_Per_ePWM1 = (6e7*_T_epwm*2.0);
+    init_EPWM1234_saw_tooth((uint16_t)g_Per_ePWM1);
+    init_EPWM1_Interrupts();
+
+    // SCIA 초기화
+    scia_init(9600);    // SCIA 초기화
+
+    // ADCA 초기화
+    initADC();
+    initADCSOC();
+    setupADCAInterrupt();// 인터럽트 설정
+
+    // 타이머1 초기화
+    initTimer1(_T_1msec);
+
+    // SPI for ADS8584S 설정, ADS8584S=EXT_ADC
+    initADS8584S_GPIO(); // use FIFO
+
+    EINT;  // Enable Global Interrupt
+    ERTM;  // Enable Realtime Interrupt
+
+
+    CG_cccv_control();  //초기치 계산을 위해 최초 한번 함수 호출
+    Oper_mode_select();
+
+    while(1)
+    {
+        GPIO_togglePin(LED_GPIO60);
+        Status_display();
+        ADC_DIN_display();
+
+        if(kbhit()) Key_process(getchar1());
+    }
+}
+
+

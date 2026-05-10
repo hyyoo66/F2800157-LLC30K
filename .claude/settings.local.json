@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where gmake *)",
+      "Read(//c/ti/ccs1281/ccs/utils/**)",
+      "Bash(\"C:/ti/ccs1280/ccs/utils/bin/gmake.exe\" -C \"D:/Ti_280039_Work_Space/F2800157-LLC30K/CPU1_LAUNCHXL_FLASH\")",
+      "Bash(\"C:/ti/ccs1280/ccs/utils/bin/gmake.exe\" -C \"D:/Ti_280039_Work_Space/F2800157-LLC30K/CPU1_LAUNCHXL_FLASH\" -B)",
+      "Bash(\"C:/ti/ccs1280/ccs/tools/compiler/ti-cgt-c2000_22.6.1.LTS/bin/cl2000\" -v28 -ml -mt --cla_support=cla2 --float_support=fpu32 --tmu_support=tmu0 --vcu_support=vcrc -O3 --include_path=\"C:/ti/c2000/C2000Ware_5_05_00_00/device_support/f280015x/headers/include\" --include_path=\"D:/Ti_280039_Work_Space/F2800157-LLC30K\" --include_path=\"D:/Ti_280039_Work_Space/F2800157-LLC30K/device\" --include_path=\"C:/ti/c2000/C2000Ware_5_05_00_00/driverlib/f280015x/driverlib\" --include_path=\"C:/ti/ccs1280/ccs/tools/compiler/ti-cgt-c2000_22.6.1.LTS/include\" --define=DEBUG --define=_FLASH --define=_LAUNCHXL_F2800157 --diag_wrap=off --display_error_number --abi=eabi --include_path=\"./syscfg\" --cmd_file=\"syscfg/board.opt\" --cmd_file=\"syscfg/c2000ware_libraries.opt\" \"../init_DSP_ADC.c\" \"../init_EPWM123_PSM.c\" \"../init_SCIA_baudrate.c\" \"../key_print_digit_260507.c\" \"../launchxl_ex1_sci_io_driverlib.c\" \"../main.c\")",
+      "Bash(reg query *)",
+      "Bash(zip -r \"20260505_1033.zip\" \"20260505_1033/\")",
+      "Bash(tar -czf backup_pwm3b_safe.tar.gz *.c *.h)",
+      "Bash(tar -czf backup_overcurrent_protection_260505.tar.gz *.c *.h)",
+      "Bash(tar -czf backup_final_cleanup_260505.tar.gz *.c *.h)",
+      "Bash(mv backup_sync_fix_260505.tar.gz backup_260505_1850_sync_fix.tar.gz)",
+      "Bash(mv backup_epwm_isr_removed_260505.tar.gz backup_260505_1900_epwm_isr_removed.tar.gz)",
+      "Bash(mv backup_overcurrent_protection_260505.tar.gz backup_260505_1920_overcurrent_protection.tar.gz)",
+      "Bash(mv backup_cleanup_260505.tar.gz backup_260505_1925_cleanup.tar.gz)",
+      "Bash(mv backup_final_cleanup_260505.tar.gz backup_260505_1930_final_cleanup.tar.gz)",
+      "Bash(mv backup_current.tar.gz backup_260504_1614_old.tar.gz)",
+      "Bash(mv backup_pwm3b_safe.tar.gz backup_260505_1812_old_pwm3b_safe.tar.gz)",
+      "Bash(tar -czf backup_260505_1919_complete.tar.gz *.c *.h)",
+      "Bash(powershell -Command \"Get-Date -Format 'yyMMdd_HHmm'\")",
+      "Bash(grep -E '\\\\.c$|\\\\.h$')",
+      "Bash(tar -czf backup_260505_2045_complete_final.tar.gz main.c init_EPWM123_PSM.c init_EPWM123_PSM.h init_DSP_ADC.c init_DSP_ADC.h)",
+      "Bash(tar -tzf backup_260505_2045_complete_final.tar.gz)",
+      "Bash(tar -czf backup_260505_2216_final_verified.tar.gz main.c init_EPWM123_PSM.c init_EPWM123_PSM.h init_DSP_ADC.c init_DSP_ADC.h)",
+      "Read(//c/Users/hyyoo/.claude/**)",
+      "Bash(findstr \"2026\")",
+      "Bash(awk '{print $6, $7, $8, $9}')",
+      "Bash(tar -czf backup_260507_2132_watchdog.tar.gz main.c init_DSP_ADC.c init_DSP_ADC.h key_print_digit_260507.c key_print_digit_260507.h)",
+      "Bash(tar -czf backup_260507_2230_isr_fix.tar.gz main.c init_DSP_ADC.c init_DSP_ADC.h key_print_digit_260507.c key_print_digit_260507.h)",
+      "Bash(tar -tzf backup_260507_2230_isr_fix.tar.gz)",
+      "PowerShell(git -C \"D:\\\\Ti_280039_Work_Space\\\\F2800157-LLC30K\" init)"
+    ]
+  }
+}
