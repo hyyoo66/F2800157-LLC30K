@@ -24,11 +24,6 @@ void initADC(void);
 void initADCSOC(void);
 void setupADCAInterrupt(void);
 
-void initDAC_AOUT(void);
-void setDAC_A_voltage(float v);
-
-void initDAC_BOUT(void);
-void setDAC_B_voltage(float v);
 
 // ADCA1 占쏙옙占싶뤄옙트
 __interrupt void adcA1ISR(void);

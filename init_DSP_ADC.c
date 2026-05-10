@@ -40,51 +40,18 @@ extern __interrupt void adcA1ISR(void);  // defined in main.c
  {
      // ADCA, ADCB 클럭 분주 설정 (e.g., SYSCLK/4)
      ADC_setPrescaler(ADCA_BASE, ADC_CLK_DIV_4_0);
-     ADC_setPrescaler(ADCB_BASE, ADC_CLK_DIV_4_0);
 
      // 기준전압 설정 + OTP offset trim 로드
      ADC_setVREF(ADCA_BASE, ADC_REFERENCE_INTERNAL, ADC_REFERENCE_3_3V);
      ADC_setOffsetTrim(ADCA_BASE);
 
-     ADC_setVREF(ADCB_BASE, ADC_REFERENCE_INTERNAL, ADC_REFERENCE_3_3V);
-     ADC_setOffsetTrim(ADCB_BASE);
-
      // 인터럽트 발생 위치: 샘플 완료 후
      ADC_setInterruptPulseMode(ADCA_BASE, ADC_PULSE_END_OF_CONV);
-     ADC_setInterruptPulseMode(ADCB_BASE, ADC_PULSE_END_OF_CONV);
 
      // 전원 켜기
      ADC_enableConverter(ADCA_BASE);
-     ADC_enableConverter(ADCB_BASE);
 
      DEVICE_DELAY_US(1000);  // 안정화 대기
- }
-
-
- // DAC_AOUT 초기화
- void initDAC_AOUT(void)
- {
-     // 1. DAC 활성화 전 clock 설정 (Device_init()에서 이미 수행됨)
-
-     // 2. 기준 전압 선택 (3.3V 기준)
-     DAC_setReferenceVoltage(DACA_BASE, DAC_REF_ADC_VREFHI);
-
-     // 3. 출력 활성화
-     DAC_enableOutput(DACA_BASE);
-
-     // 4. 초기 값 (0V)
-     DAC_setShadowValue(DACA_BASE, 0);
- }
-
-// DAC_AOUT 전압 출력
- void setDAC_A_voltage(float v)
- {
-     float vref = 3.3f;
-     uint16_t code = (uint16_t)((v / vref) * 4095.0f);
-
-     if (code > 4095) code = 4095;
-
-     DAC_setShadowValue(DACA_BASE, code);
  }
 
 

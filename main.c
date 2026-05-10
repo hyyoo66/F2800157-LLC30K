@@ -600,8 +600,6 @@ void main(void)
     initADCSOC();
     setupADCAInterrupt();// 인터럽트 설정
 
-    initDAC_AOUT();
-
     // 타이머1 초기화
     initTimer1(T_1msec);  // 1kHz
 
